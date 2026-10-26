@@ -7,6 +7,8 @@ except Exception as err:
     print(f'Error: {err}\nPlease install the required libraries using the command: pip install -r requirements.txt')
     exit()
 
+from usb_whitelist import Whitelist, DeviceWatcher, DEFAULT_WHITELIST
+
 class Logger:
     def get_time():
         return datetime.fromtimestamp(round(BadUSBDetector.get_ms()/1000))
@@ -14,7 +16,8 @@ class Logger:
         print(f'{Logger.get_time()} | [{symbol}] {text}')
 
 class BadUSBDetector:
-    def __init__(self, max_trigger: int = 10, log: bool = False):
+    def __init__(self, max_trigger: int = 10, log: bool = False,
+                 use_whitelist: bool = False, whitelist_path: str = DEFAULT_WHITELIST):
         self.trigger            : int    = 0               # Number of key pressed in a short time
         self.max_trigger        : int    = max_trigger     # Maximum number of key pressed in a short time to block the keyboard
         self.last_time_release  : int    = 0               # Last time a key was released
@@ -23,6 +26,9 @@ class BadUSBDetector:
         self.blocked            : bool   = False           # Keyboard blocked status
         self.keys_hook          : bool   = None            # Keyboard hook
         self.log = log
+        self.use_whitelist      : bool   = use_whitelist   # Enable device-identity (allow-list) check
+        self.whitelist_path     : str    = whitelist_path
+        self.whitelist_block    : bool   = False           # True while a non-whitelisted keyboard is plugged in
     
     def new_notification(self, title: str, message: str):
         try:
@@ -60,6 +66,8 @@ class BadUSBDetector:
     
     def unblock_keyboard_thread(self):
         while True:
+            if self.whitelist_block:   # an unknown device is present: keep blocked until it is removed
+                return
             if self.blocked:
                 if BadUSBDetector.get_ms() - self.blocked_start_time > 5000:
                     self.unblock_keyboard()
@@ -92,11 +100,33 @@ class BadUSBDetector:
                     self.blocked_start_time = BadUSBDetector.get_ms()
                     threading.Thread(target=self.unblock_keyboard_thread).start()
     
+    # ---- Whitelist (device-identity) layer ----
+    def on_unknown_device(self, dev):
+        Logger.log('WARNING', f'Non-whitelisted keyboard: {dev.key()} "{dev.name}"') if self.log else None
+        threading.Thread(
+            target=self.new_notification,
+            args=('Unknown USB keyboard', f'{dev.name} ({dev.key()}) is not whitelisted.\nInput blocked until it is unplugged.',)
+        ).start()
+        self.whitelist_block = True
+        if not self.blocked:
+            self.block_keyboard()
+            self.blocked = True
+
+    def on_device_removed(self, dev, still_flagged: bool):
+        Logger.log('INFO', f'Non-whitelisted keyboard removed: {dev.key()}') if self.log else None
+        if not still_flagged and self.whitelist_block:
+            self.whitelist_block = False
+            self.unblock_keyboard()
+
     def start(self):
         Logger.log('INFO', 'BadUSB Detector started !') if self.log else None
+        if self.use_whitelist:
+            wl = Whitelist(self.whitelist_path)
+            Logger.log('INFO', f'Whitelist loaded: {len(wl.entries)} device(s)') if self.log else None
+            DeviceWatcher(wl, self.on_unknown_device, self.on_device_removed).start()
         with Listener(on_release=self.on_release) as listener:
             listener.join()
 
 if __name__ == "__main__":
-    detector = BadUSBDetector(log=True)
+    detector = BadUSBDetector(log=True, use_whitelist=True)
     detector.start()
